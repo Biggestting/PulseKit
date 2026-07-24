@@ -40,6 +40,8 @@ public enum PulseKit {
     private static let anonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl4eXdud3lqa3hkbWpsdnNmcWF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU1MDUxODMsImV4cCI6MjA5MTA4MTE4M30.ZBjc2wBkNGrzKajNsQovCCkScYhwv5WuDbAhc0KF-68"
 
     private static let installIDKey = "com.proceeds.pulsekit.installID"
+    /// Set once the entitlement backfill has completed a full pass for this install.
+    private static let backfillDoneKey = "com.proceeds.pulsekit.entitlementBackfillDone"
     private static let lastOpenDayKey = "com.proceeds.pulsekit.lastOpenDay"
 
     private static let lock = NSLock()
@@ -65,7 +67,10 @@ public enum PulseKit {
         lock.unlock()
         guard shouldStart else { return }
         listenForTransactions()
-        if trackAppOpens { startOpenTracking() }
+        if trackAppOpens {
+            startOpenTracking()
+            backfillExistingEntitlementsOnce()
+        }
     }
 
     /// The random, locally-generated id for this install — created on first use
@@ -102,9 +107,51 @@ public enum PulseKit {
         return trackOpens
     }
 
-    private static func report(_ signedTransaction: String) async {
-        guard let key = currentKey(), !key.isEmpty else { return }
+    /// Attach this install to purchases the buyer made BEFORE the host app shipped
+    /// PulseKit.
+    ///
+    /// `Transaction.updates` only ever fires for transactions that change after the
+    /// listener attaches — it does not replay a purchase that was already finished.
+    /// Without this, every pre-existing customer stayed permanently unjoinable: the
+    /// purchase row had no install_id, so the buyer's usage history could never be
+    /// shown. Replaying `currentEntitlements` once fills that gap.
+    ///
+    /// Sent with `backfillOnly`, which the server honours as an UPDATE that can only
+    /// ever attach an install id to a row that already exists — it cannot insert a
+    /// purchase and cannot fire a push. Both matter: these transactions are usually
+    /// already in the ledger via Apple's webhook, so inserting would double-count
+    /// revenue, and pushing would cha-ching a months-old sale on every fresh install.
+    ///
+    /// Runs once per install. Guarded by a `UserDefaults` flag rather than repeating
+    /// each launch, since after the first successful pass every row it can reach is
+    /// already stamped and further passes are pure wasted requests.
+    @available(iOS 15.0, macOS 12.0, tvOS 15.0, watchOS 8.0, *)
+    private static func backfillExistingEntitlementsOnce() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: backfillDoneKey) else { return }
+        Task.detached(priority: .background) {
+            var allDelivered = true
+            for await entitlement in Transaction.currentEntitlements {
+                let ok = await report(entitlement.jwsRepresentation, backfillOnly: true)
+                if !ok { allDelivered = false }
+            }
+            // Only mark done when every entitlement actually reached the server. A
+            // launch with no network would otherwise burn the single attempt and
+            // leave that buyer unjoinable forever; an app killed mid-walk likewise
+            // retries next launch.
+            if allDelivered { defaults.set(true, forKey: backfillDoneKey) }
+        }
+    }
+
+    /// Returns whether the server accepted the report. The live path ignores this —
+    /// a dropped purchase is re-delivered by `Transaction.updates` — but the
+    /// entitlement backfill needs it, since that pass runs exactly once and must not
+    /// mark itself done after a failed round trip.
+    @discardableResult
+    private static func report(_ signedTransaction: String, backfillOnly: Bool = false) async -> Bool {
+        guard let key = currentKey(), !key.isEmpty else { return false }
         var payload: [String: Any] = ["key": key, "signedTransaction": signedTransaction]
+        if backfillOnly { payload["backfillOnly"] = true }
         // Only correlate a purchase to its install when the host app opted into
         // open tracking — otherwise no install id exists to send.
         if opensEnabled() { payload["installId"] = installID }
@@ -114,7 +161,12 @@ public enum PulseKit {
         req.setValue(anonKey, forHTTPHeaderField: "apikey")
         req.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
         req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-        _ = try? await URLSession.shared.data(for: req)
+        guard let (_, response) = try? await URLSession.shared.data(for: req) else { return false }
+        // 401 (bad signature) and 400 are permanent for this transaction — treat them
+        // as handled so a single unverifiable entitlement can't wedge the backfill
+        // into retrying forever. Only transport failures and 5xx count as "try again".
+        guard let http = response as? HTTPURLResponse else { return false }
+        return http.statusCode < 500
     }
 
     // MARK: - App opens (opt-in)
