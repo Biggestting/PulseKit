@@ -30,21 +30,33 @@ and every host app pins the package with an `from:` (up-to-next-major) rule.
 Do this only when you're already shipping that app — don't force-release every app
 for one SDK change.
 
+**These apps gitignore `Package.resolved` (and usually the whole `.xcodeproj/`, which
+xcodegen regenerates).** So the pin is NOT version-controlled: on a clean checkout +
+`xcodegen generate` + archive, SwiftPM resolves the newest tag satisfying `from:`
+automatically. For a same-line bump (1.2.0 → 1.3.0) the next clean archive picks it
+up with **nothing to commit and no pin to edit**.
+
 1. `cd <app> && xcodegen generate`
-2. Refresh the locked pin to the newest satisfying tag:
-   ```bash
-   xcodebuild -resolvePackageDependencies -project <App>.xcodeproj -scheme <scheme>
-   ```
-   (or Xcode → File → Packages → **Update to Latest Package Versions**)
-3. **Commit the updated `Package.resolved`.** This is the actual "update" — see below.
-4. Archive + ship as normal. No call-site change; `configure(key:)` already does everything.
+2. Archive + ship as normal. No call-site change; `configure(key:)` already does everything.
 
-### Why step 3 is the real update — and the thing that will bite you
+### The one thing that will bite you: a stale local SwiftPM cache
 
-`from:` lets a new tag *resolve*, but each app commits a `Package.resolved` that
-**locks the exact old revision**. Until you run the resolve step, the build keeps
-compiling the pinned old version no matter how many tags you cut. The resolve +
-committed `Package.resolved` IS the update; the `from:` rule alone never advances.
+SwiftPM caches a bare clone of the package. If you tagged the new version AFTER that
+cache was populated, a local `-resolvePackageDependencies` / archive can keep
+resolving the OLD tag because the cache never fetched the new one. Force it to refetch:
+
+```bash
+rm -rf ~/Library/Caches/org.swift.swiftpm/repositories/PulseKit-*
+rm -rf ~/Library/Developer/Xcode/DerivedData/<App>-*/SourcePackages
+rm -f <App>.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+xcodebuild -resolvePackageDependencies -project <App>.xcodeproj -scheme <scheme>
+```
+
+Confirm the tail prints `PulseKit ... @ 1.3.0`. Clean CI / a fresh machine has no
+stale cache and resolves 1.3.0 on the first try.
+
+> If a particular app DOES commit its `Package.resolved` (not the pattern here, but
+> possible), then also commit the refreshed file — for that app it IS the pin.
 
 ## What must NEVER change (or the Proceeds data source breaks)
 
