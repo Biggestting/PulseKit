@@ -82,7 +82,25 @@ endpoint, so a version bump can't break an existing data source.
 
 ## Current state
 
-- Latest tag: **`1.3.0`** — daily `Product.SubscriptionInfo.status(for:)` snapshot →
-  `sdk-status` edge fn → `subscription_state` (client-side lifecycle, no ASC setup).
-- All 17 host apps pin `from: 1.x.0`, so 1.3.0 is auto-eligible everywhere; each
-  picks it up on its next release via the resolve step above.
+- Latest tag: **`1.4.0`** (2026-08-28) — fixes the entitlement backfill silently
+  giving up forever after a zero-match response. Root cause (confirmed via live
+  data: 0% of `purchase_events` across the ENTIRE portfolio had `install_id`,
+  despite `app_opens` proving `trackAppOpens` is genuinely active everywhere):
+  `backfillExistingEntitlementsOnce()` only checked the HTTP status, but the
+  server always returns 200 for a `backfillOnly` call whether or not its
+  `UPDATE` matched a row — so a single silent no-match (most likely: the ASN
+  webhook hadn't ingested that purchase yet on the very first post-upgrade
+  launch) permanently marked the whole pass "done", with zero retry and zero
+  diagnostic trail. Fixed by reading the response body's `backfilled` count and
+  only marking done when every entitlement genuinely settled (matched, or
+  confirmed permanently unverifiable). Also renamed the `UserDefaults` done-flag
+  key (`_v2`) so every install — including ones that already ran the buggy
+  pass — gets exactly one fresh attempt under the corrected logic; the fix is
+  otherwise inert on an install that already (silently, wrongly) marked itself
+  done under the old key.
+- `1.3.0` — daily `Product.SubscriptionInfo.status(for:)` snapshot → `sdk-status`
+  edge fn → `subscription_state` (client-side lifecycle, no ASC setup).
+- All 17 host apps pin `from: 1.x.0`, so 1.4.0 is auto-eligible everywhere; each
+  picks it up on its next release via the resolve step above. **This one is worth
+  prioritizing** — every app currently has zero working buyer-journey/"last seen"
+  data for its purchasers, not a partial gap.
