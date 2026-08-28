@@ -53,7 +53,11 @@ public enum PulseKit {
 
     private static let installIDKey = "com.proceeds.pulsekit.installID"
     /// Set once the entitlement backfill has completed a full pass for this install.
-    private static let backfillDoneKey = "com.proceeds.pulsekit.entitlementBackfillDone"
+    /// Renamed (v2) so every install gets ONE fresh attempt under the corrected
+    /// match-checking logic below — the old key was marked done after silently
+    /// matching zero rows (see git history), so installs that already ran the
+    /// buggy pass would otherwise never retry just from updating the SDK.
+    private static let backfillDoneKey = "com.proceeds.pulsekit.entitlementBackfillDone_v2"
     private static let lastOpenDayKey = "com.proceeds.pulsekit.lastOpenDay"
     /// UTC day of the last subscription-status snapshot — throttles it to once a day.
     private static let lastStatusDayKey = "com.proceeds.pulsekit.lastStatusDay"
