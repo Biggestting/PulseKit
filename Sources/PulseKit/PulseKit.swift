@@ -146,28 +146,70 @@ public enum PulseKit {
         let defaults = UserDefaults.standard
         guard !defaults.bool(forKey: backfillDoneKey) else { return }
         Task.detached(priority: .background) {
-            var allDelivered = true
+            var allSettled = true
             for await entitlement in Transaction.currentEntitlements {
-                let ok = await report(entitlement.jwsRepresentation, backfillOnly: true)
-                if !ok { allDelivered = false }
+                switch await reportBackfill(entitlement.jwsRepresentation) {
+                case .matched, .permanentlyRejected:
+                    break   // resolved either way — matched a row, or never will (bad signature)
+                case .noMatch, .transportFailure:
+                    // A 200 with zero rows updated is NOT success — it means the
+                    // account/transaction pair didn't (yet) find a match server-side
+                    // (e.g. the webhook hadn't ingested this purchase when the FIRST
+                    // launch after enabling this ran). Retrying on a later launch lets
+                    // it self-heal once that row exists, instead of silently and
+                    // permanently giving up on this install's correlation — which is
+                    // exactly what happened before this fix: the old code only checked
+                    // the HTTP status (always 200 here), never the match count, so ANY
+                    // no-match attempt marked the WHOLE pass "done" forever.
+                    allSettled = false
+                }
             }
-            // Only mark done when every entitlement actually reached the server. A
-            // launch with no network would otherwise burn the single attempt and
-            // leave that buyer unjoinable forever; an app killed mid-walk likewise
-            // retries next launch.
-            if allDelivered { defaults.set(true, forKey: backfillDoneKey) }
+            // Only mark done when every entitlement genuinely resolved — matched, or
+            // confirmed there was nothing to do. A launch with no network, a 5xx, or a
+            // zero-row match all leave the flag unset so the next launch retries.
+            if allSettled { defaults.set(true, forKey: backfillDoneKey) }
         }
     }
 
-    /// Returns whether the server accepted the report. The live path ignores this —
-    /// a dropped purchase is re-delivered by `Transaction.updates` — but the
-    /// entitlement backfill needs it, since that pass runs exactly once and must not
-    /// mark itself done after a failed round trip.
+    private enum BackfillOutcome {
+        case matched               // server found and patched an existing row
+        case noMatch                // 200 OK, but backfilled: 0 — retry later
+        case permanentlyRejected   // 400/401 — this signed transaction will never verify; stop trying it
+        case transportFailure      // network error or 5xx — retry later
+    }
+
+    /// Backfill-only report: unlike the live `report(_:)`, this reads the response
+    /// BODY (`{ backfilled: N }`), not just the HTTP status — the server always
+    /// returns 200 for a backfill call, whether or not its UPDATE matched any row,
+    /// so status-only success checking can't tell "patched" from "silently no-op'd".
+    private static func reportBackfill(_ signedTransaction: String) async -> BackfillOutcome {
+        guard let key = currentKey(), !key.isEmpty else { return .transportFailure }
+        var payload: [String: Any] = ["key": key, "signedTransaction": signedTransaction, "backfillOnly": true]
+        // Only correlate a purchase to its install when the host app opted into
+        // open tracking — otherwise no install id exists to send.
+        if opensEnabled() { payload["installId"] = installID }
+        var req = URLRequest(url: ingestURL)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(anonKey, forHTTPHeaderField: "apikey")
+        req.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        guard let (data, response) = try? await URLSession.shared.data(for: req),
+              let http = response as? HTTPURLResponse else { return .transportFailure }
+        if http.statusCode == 400 || http.statusCode == 401 { return .permanentlyRejected }
+        guard http.statusCode < 500 else { return .transportFailure }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let backfilled = obj["backfilled"] as? Int else { return .transportFailure }
+        return backfilled > 0 ? .matched : .noMatch
+    }
+
+    /// Returns whether the server accepted the report. Used by the LIVE path only —
+    /// a dropped live purchase is re-delivered by `Transaction.updates` itself, so
+    /// this only needs to know the round trip succeeded, not whether a row changed.
     @discardableResult
-    private static func report(_ signedTransaction: String, backfillOnly: Bool = false) async -> Bool {
+    private static func report(_ signedTransaction: String) async -> Bool {
         guard let key = currentKey(), !key.isEmpty else { return false }
         var payload: [String: Any] = ["key": key, "signedTransaction": signedTransaction]
-        if backfillOnly { payload["backfillOnly"] = true }
         // Only correlate a purchase to its install when the host app opted into
         // open tracking — otherwise no install id exists to send.
         if opensEnabled() { payload["installId"] = installID }
