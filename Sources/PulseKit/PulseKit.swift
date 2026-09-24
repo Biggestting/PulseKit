@@ -2,6 +2,8 @@ import Foundation
 import StoreKit
 #if canImport(UIKit)
 import UIKit
+#elseif canImport(AppKit)
+import AppKit
 #endif
 
 /// PulseKit — a tiny StoreKit 2 transaction relay. Configure it once with the
@@ -254,6 +256,12 @@ public enum PulseKit {
         statusObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil
         ) { _ in reportSubscriptionStatusesIfNeeded() }
+        #elseif canImport(AppKit)
+        // Native Mac apps stay open for days; without this a user who leaves the
+        // app running is only counted on the day it launched.
+        statusObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: nil
+        ) { _ in reportSubscriptionStatusesIfNeeded() }
         #endif
     }
 
@@ -330,6 +338,12 @@ public enum PulseKit {
         openObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil
         ) { _ in reportOpenIfNeeded() }
+        #elseif canImport(AppKit)
+        // Native Mac apps stay open for days; without this a user who leaves the
+        // app running is only counted on the day it launched.
+        openObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: nil
+        ) { _ in reportOpenIfNeeded() }
         #endif
     }
 
@@ -350,6 +364,10 @@ public enum PulseKit {
         if let bundleID = Bundle.main.bundleIdentifier { payload["bundleId"] = bundleID }
         if let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String { payload["appVersion"] = v }
         payload["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
+        // Machine-readable platform + OS (osVersion above is a localized display
+        // string like "Versión 26.1", so the server can't parse it reliably).
+        payload["platform"] = platformName
+        payload["osVersionNum"] = numericOSVersion
 
         Task.detached(priority: .background) {
             var req = URLRequest(url: openURL)
@@ -364,5 +382,34 @@ public enum PulseKit {
                 UserDefaults.standard.removeObject(forKey: lastOpenDayKey)
             }
         }
+    }
+
+    // MARK: - Platform
+
+    /// Which platform this install runs on, so the dashboard can split iPhone,
+    /// iPad, Mac and Apple TV usage of the same bundle id.
+    static var platformName: String {
+        #if os(visionOS)
+        return "visionos"
+        #elseif os(watchOS)
+        return "watchos"
+        #elseif os(tvOS)
+        return "tvos"
+        #elseif os(macOS)
+        return "macos"
+        #elseif targetEnvironment(macCatalyst)
+        return "maccatalyst"
+        #else
+        if ProcessInfo.processInfo.isiOSAppOnMac { return "macos" }
+        return UIDevice.current.userInterfaceIdiom == .pad ? "ipados" : "ios"
+        #endif
+    }
+
+    /// "26.1" or "26.1.2" — unlocalized, unlike operatingSystemVersionString.
+    static var numericOSVersion: String {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        return v.patchVersion > 0
+            ? "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
+            : "\(v.majorVersion).\(v.minorVersion)"
     }
 }

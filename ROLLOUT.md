@@ -82,7 +82,15 @@ endpoint, so a version bump can't break an existing data source.
 
 ## Current state
 
-- Latest tag: **`1.4.1`** (2026-09-24) — renames the backfill done-flag to `_v3`
+- Latest tag: **`1.4.2`** (2026-09-24) — app-open pings now send `platform`
+  (ios / ipados / maccatalyst / macos / tvos / watchos / visionos) and an
+  unlocalized `osVersionNum` ("26.1"); `osVersion` stays as-is for old rows.
+  Native AppKit Mac apps now re-count on `NSApplication.didBecomeActive`
+  (previously only UIKit reactivation was observed, so a Mac app left open for
+  days counted only on launch day). Server: `sdk-open` v3 + `app_opens.platform`
+  / `os_version_num` columns (allowlisted). Pre-1.4.2 rows keep platform NULL.
+  No call-site change; ride-along on each app's next normal release.
+- `1.4.1` (2026-09-24) — renames the backfill done-flag to `_v3`
   so every install re-sends its existing entitlements once. Server-side root
   cause (not an SDK bug): `sdk-ingest` used `@apple/app-store-server-library`'s
   `SignedDataVerifier`, which threw a bare `Error` under Deno for every
@@ -109,7 +117,7 @@ endpoint, so a version bump can't break an existing data source.
   done under the old key.
 - `1.3.0` — daily `Product.SubscriptionInfo.status(for:)` snapshot → `sdk-status`
   edge fn → `subscription_state` (client-side lifecycle, no ASC setup).
-- All 17 host apps pin `from: 1.x.0`, so 1.4.1 is auto-eligible everywhere; each
+- All 17 host apps pin `from: 1.x.0`, so 1.4.2 is auto-eligible everywhere; each
   picks it up on its next release via the resolve step above. **This one is worth
   prioritizing** — every app currently has zero working buyer-journey/"last seen"
   data for its purchasers, not a partial gap.
