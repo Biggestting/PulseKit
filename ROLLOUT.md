@@ -82,7 +82,16 @@ endpoint, so a version bump can't break an existing data source.
 
 ## Current state
 
-- Latest tag: **`1.4.0`** (2026-08-28) — fixes the entitlement backfill silently
+- Latest tag: **`1.4.1`** (2026-09-24) — renames the backfill done-flag to `_v3`
+  so every install re-sends its existing entitlements once. Server-side root
+  cause (not an SDK bug): `sdk-ingest` used `@apple/app-store-server-library`'s
+  `SignedDataVerifier`, which threw a bare `Error` under Deno for every
+  transaction — 124/124 reports rejected as `invalid_signature` (11 apps, prod +
+  sandbox), so no purchase ever got an `install_id`. Fixed in `sdk-ingest` v16
+  by switching to the jose + x509 chain check `appstore-webhook` uses (verified
+  against a real production transaction). New purchases link immediately; old
+  buyers link only after each host app ships a build on 1.4.1.
+- `1.4.0` (2026-08-28) — fixes the entitlement backfill silently
   giving up forever after a zero-match response. Root cause (confirmed via live
   data: 0% of `purchase_events` across the ENTIRE portfolio had `install_id`,
   despite `app_opens` proving `trackAppOpens` is genuinely active everywhere):
@@ -100,7 +109,7 @@ endpoint, so a version bump can't break an existing data source.
   done under the old key.
 - `1.3.0` — daily `Product.SubscriptionInfo.status(for:)` snapshot → `sdk-status`
   edge fn → `subscription_state` (client-side lifecycle, no ASC setup).
-- All 17 host apps pin `from: 1.x.0`, so 1.4.0 is auto-eligible everywhere; each
+- All 17 host apps pin `from: 1.x.0`, so 1.4.1 is auto-eligible everywhere; each
   picks it up on its next release via the resolve step above. **This one is worth
   prioritizing** — every app currently has zero working buyer-journey/"last seen"
   data for its purchasers, not a partial gap.
